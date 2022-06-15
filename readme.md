@@ -5,3 +5,5 @@ Second commitss
 * -another anothe rline
 dfd
 This content is from new-branch
+
+testing sync-changes of new-branch2
