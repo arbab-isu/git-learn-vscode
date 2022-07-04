@@ -12,9 +12,12 @@ import numpy as np
 import time
 import json
 import warnings
-import io
+from numpy import linalg as LA
 import sys
+import gc
+import time
 
+from numpy import zeros
 from collections import deque
 from collections import OrderedDict
 from collections import Iterable
@@ -261,6 +264,816 @@ class TerminateOnNaN(Callback):
                 self.model.stop_training = True
 
 
+def get_weight_grad(model, inputs, outputs):
+    """ Gets gradient of model for given inputs and outputs for all weights"""
+    grads = model.optimizer.get_gradients(model.total_loss, model.trainable_weights)
+    symb_inputs = (model._feed_inputs + model._feed_targets + model._feed_sample_weights)
+    f = K.function(symb_inputs, grads)
+    x, y, sample_weight = model._standardize_user_data(inputs, outputs)
+    output_grad  = f(x + y + sample_weight)
+    return output_grad
+#{s.name: t for s, t in zip(model.trainable_weights, output_grad)}
+'''
+def get_layer_name(model):
+    names = []
+    for layer in model.layers:
+        names.append(layer.name)
+    return names
+'''
+def get_layer_name(model):
+    names = []
+    for layer in model.layers:
+        if str(layer.name).find('activation') != -1:
+            names.append(str(layer.activation).split( )[1])
+        else:
+            names.append(layer.name)
+    
+    return names
+
+
+
+
+def get_layer_output_grad_all(model, inputs, outputs, layer):
+    """ Gets gradient a layer output for given inputs and outputs"""
+    grads = model.optimizer.get_gradients(model.total_loss, model.layers[layer].output)
+    symb_inputs = (model._feed_inputs + model._feed_targets + model._feed_sample_weights)
+    f = K.function(symb_inputs, grads)
+    x, y, sample_weight = model._standardize_user_data(inputs, outputs)
+    output_grad = f(x + y + sample_weight)
+    return np.mean(output_grad)
+
+
+def get_weights(model):
+    """ Gets weight of model """
+    allweights = []
+    for layer in model.layers:
+        if len(layer.get_weights()) == 0:
+            allweights.append(None)
+        if len(layer.get_weights()) > 0:
+            weights, baises  = layer.get_weights()    
+            allweights.append(np.mean(weights.flatten()))
+    return allweights
+        
+
+#def getLayerOutput(model):
+#    outputs = [layer.output for layer in model.layers]          # all layer outputs
+#    print(outputs)
+def get_layer_output(model, inputs):
+    """ Gets a layer output for given inputs and outputs"""
+    layer_dict = dict([(layer.name, layer) for layer in model.layers])
+    outputs = []
+    for layer in model.layers:
+        keras_function = K.function([model.input], [layer.output])
+        outputs.append(np.mean(keras_function([inputs,  K.learning_phase()])))
+    return outputs
+
+def get_learn_rate(model):
+    return K.get_value(model.optimizer.lr)
+
+def meanResult(array):
+    if np.mean(array) == np.max(array):
+        return True
+    else:
+        return False
+
+def get_layer_output_observation(model, inputs):
+    """ Gets a layer output for given inputs and outputs"""
+    layer_dict = dict([(layer.name, layer) for layer in model.layers])
+    outputs = []
+    for layer in model.layers:
+        keras_function = K.function([model.input], [layer.output])
+        #outputs.append(np.mean(keras_function([inputs,  K.learning_phase()])))
+        outputs.append(keras_function([inputs,  K.learning_phase()]))
+    return outputs
+
+
+def getLR(model):
+    #print(model.optimizer.get_config())
+    #LRRecorder()
+    #return 1
+    return self.lr
+    #return float(model.optimizer.lr)
+    #return K.get_value(model.optimizer.lr)
+
+def identifyLearnRate(lr ,  weight, deltaWeight):
+    LearningRate = []
+    for w, dw in zip(weight, deltaWeight):
+        if w is not None:
+            weight_norm = LA.norm(w.ravel())
+            delta_weight_norm =  LA.norm(dw.ravel())
+            result =  (lr *delta_weight_norm )/weight_norm
+            LearningRate.append(result)
+    return LearningRate
+
+'''
+if result < 1e-3:
+    print(str(weight_norm)+"\t"+str(delta_weight_norm)+"\t"+str(result)+"\t"+str("Low"))
+else:
+    print(str(weight_norm)+"\t"+str(delta_weight_norm)+"\t"+str(result)+"\t"+str("High"))
+print("\t")
+'''
+
+
+    
+threshold_layer_1 = 0.7
+def identifyDead(paramters, index):
+    
+    data  = np.array(paramters).flatten()
+    size  = len(data)
+    '''
+    print("inside Dead min", np.min(data))
+    print("inside Dead max", np.max(data))
+    print("inside siz", len(data[data<=0.5]))
+    '''
+    inactive3 = data[data<=0.0]
+    size_inactive3 = len(inactive3)
+    
+    result = size_inactive3/size
+    #print("precent", result)
+    if result >= threshold_layer_1:
+        return True
+    return False
+
+min_threshold_tanh = -5#-9.4999
+max_thresholds_tanh = 5 #9.4999
+min_threshold_sigmoid = -5#-23
+max_thresholds_sigmoid = 5#16.99999
+threshold_layer = 0.5
+
+def identifySaturated(paramters,typeActivation, index):
+    if typeActivation =="sigmoid":
+        data = np.array(paramters).flatten()
+       
+        size = len(data)
+        #print("size =", size)
+        min_sum = len([i for i in data if i <= min_threshold_sigmoid])
+        max_sum = len([i for i in data if i >= max_thresholds_sigmoid])
+        '''
+        print("\n min",np.min(data))
+        print("\n max",np.max(data))
+        print("\n")
+        print(str((min_sum + max_sum) / size))
+        print("\n min",min_sum)
+        print("\n max",max_sum)
+        '''
+        if ((min_sum + max_sum) / size) > threshold_layer:
+           return True
+                
+    if typeActivation =="tanh":
+        data = np.array(paramters).flatten()
+        size = len(data)
+        min_sum = len([i for i in data if i <= min_threshold_tanh])
+        max_sum = len([i for i in data if i >= max_thresholds_tanh])
+        #print("\n")
+        #print(str((min_sum + max_sum) / size))
+        if ((min_sum + max_sum) / size) > threshold_layer:
+           return True
+    return False
+
+def identifyNumerical(paramters):
+    if np.isnan(paramters) or np.isinf(paramters) or paramters == 0:
+        return True
+    return False
+
+threshold_VG = 0.0000001
+def identifyVanishingGradient(paramters):
+    result = np.absolute(np.array(paramters).flatten()).mean()
+    if result < threshold_VG:
+        return True
+    return False
+
+
+max_threshold = 10
+min_threshold = 0.00001
+def identifyTensorVariance(paramters):
+    variance = np.var(paramters.flatten(),ddof=1)
+    if variance < min_threshold or  variance > max_threshold :
+        return True
+    else:
+        return False
+
+def identifyRange(model, y,typeActivation, output ):
+    y = np.array(y).flatten()
+    min_y = np.min(y)
+    max_y = np.max(y)
+    
+    output = np.array(output).flatten()
+    min_output = np.min(output)
+    max_output = np.max(output)
+    if typeActivation =="sigmoid":
+        min_activation = 0
+        max_activation = 1
+    if typeActivation =="tanh":
+        min_activation = -1
+        max_activation = 1
+    if typeActivation =="relu":
+        nameLoss = str(model.loss_functions).split(' ')
+        if nameLoss[1] == 'categorical_crossentropy' or nameLoss[1] == 'sparse_categorical_crossentropy':
+            return True
+        min_activation = 0
+        max_activation = float('inf')
+    if typeActivation.find("dense") != -1 or typeActivation =="linear" :
+        nameLoss = str(model.loss_functions).split(' ')
+        if nameLoss[1] == 'categorical_crossentropy' or nameLoss[1] == 'sparse_categorical_crossentropy':
+            return True
+        min_activation = float('-inf')
+        max_activation = float('inf')
+    if typeActivation =="elu":
+        min_activation = -1 #np.min(paramters)
+        max_activation = float('inf')
+        
+        
+
+#    print(min_activation)
+#    print(max_activation)
+#    
+#    print(min_output)
+#    print(max_output)
+#    
+#    print(min_y)
+#    print(max_y)
+    
+    if typeActivation.find("dense") != -1 or typeActivation =="linear" :
+        if np.abs(max_output - min_output ) > np.abs(max_y - min_y ) *10:
+            return True
+
+    
+    
+    
+    #if min_activation < min_y   or max_activation > max_y:
+      #  return True
+    
+    if min_y < min_activation   or max_y > max_activation:
+        return True
+    #if min_output < min_activation   or max_output > max_output:
+        #return True
+    return False
+
+def OutofRangAnalysis(moddel,layer,X_train, file):
+#    if np.min(X_train) < -1 or np.max(X_train) > 1 :
+#        file.write("\t Normalize the data \t")
+#        return 0
+    
+    nameLoss = str(moddel.loss_functions).split(' ')
+    if nameLoss[1] == 'categorical_crossentropy' or 'sparse_categorical_crossentropy':
+        file.write(" \t change the activation function to softmax \t")
+        return 0
+
+    file.write(" \t Please change the activation function at layer : {0} in same range of input data \t".format(layer))
+
+def UnchangeTensor(model, location, layer, NoLayer, get_weights, get_lr, file ):
+    if location == 'FW'  and (layer +1) != NoLayer:
+        for w in get_weights:
+                if w is not None:
+                    if identifyTensorVariance(w):
+                        file.write("\t Poor Weight \t")
+                        return 0
+        for lr in get_lr:
+            if lr > LearnRate_threshold * 100 or lr < LearnRate_threshold / 100:
+                file.write(" \t Learning Rate \t")
+                return 0
+    if location == 'FW'  and (layer +1) == NoLayer:
+        file.write(" \t Please change the activation function at layer : {0} \t".format(layer))
+        return 0
+    
+    if location == 'W'  or location == 'DW':
+        for w in get_weights:
+                if w is not None:
+                    if identifyTensorVariance(w):
+                        file.write("\t Poor Weight \t")
+                        return 0
+        for lr in get_lr:
+            if lr > LearnRate_threshold * 100 or lr < LearnRate_threshold / 100:
+                file.write(" \t Learning Rate \t")
+                return 0
+            
+    file.write(" \t Please change Optimizer \t")
+    return 0
+    
+LearnRate_threshold = 1e-3
+def NumericalErrorAnalysis(model, X_train, location, layer, NoLayer, get_weights, get_lr, file):
+    if location =='FW' or location =='W':
+        #print(get_weights)
+        #print(get_lr)
+        for w in get_weights:
+            if w is not None:
+                if identifyTensorVariance(w):
+                    file.write("\t Poor Weight \t")
+                    return 0
+        if np.min(X_train) < -1 or np.max(X_train) > 1 :
+            file.write("\t Normalize the data \t")
+            return 0
+        else:
+            for lr in get_lr:
+                if lr > LearnRate_threshold * 100 or lr < LearnRate_threshold / 100:
+                    file.write("\tLearning Rate \t")
+                    return 0
+        file.write("\tPlease change the activaton function at layer: {0}\t".format(layer + 1))
+        return 0
+
+    if location == 'DW'  and (layer +2) == NoLayer:
+        file.write("\t Please change the loss function \t " +"OR Please change the activaton function at layer: {0} \t".format(layer + 1))
+        return 0
+    if (location == 'DW' or location == 'OG')  and  (layer + 1) < NoLayer:
+        file.write("\t Please change the activaton function at layer: {0} \t".format(layer + 1))
+        return 0
+
+def AccuracyAnalysis(model, X_train, location, NoLayer, get_weights, get_lr, file):
+    for w in get_weights:
+        if w is not None:
+            if identifyTensorVariance(w):
+                file.write(" \tPoor Weight \t")
+                return 0
+    if np.min(X_train) < -1 or np.max(X_train) > 1 :
+        file.write("\t Normalize the data \t")
+        return 0
+    else:
+        for lr in get_lr:
+            if lr > LearnRate_threshold * 100 or lr < LearnRate_threshold / 100:
+                file.write("\t Learning Rate \t")
+                return 0
+    file.write("\t Please change optimizer \t")
+def AccuracyInvalid(model, X_train, typeActivation, NoLayer, get_weights, get_lr, file):
+    if typeActivation.find("dense") != -1 or typeActivation =="linear" :
+        file.write(" \t Please change the activation function at layer : {0} \t".format(NoLayer-1))
+        return 0
+    for lr in get_lr:
+            if lr > LearnRate_threshold * 100 or lr < LearnRate_threshold / 100:
+                file.write("\t Learning Rate \t")
+                return 0
+    file.write("\t Please change optimizer \t")
+def LossAnalysis(model, X_train, location, NoLayer, get_weights, get_lr, file ):
+    for w in get_weights:
+        if w is not None:
+            if identifyTensorVariance(w):
+                file.write(" \tPoor Weight \t")
+                return 0
+    if np.min(X_train) < -1 or np.max(X_train) > 1 :
+        file.write("\t Normalize the data \t")
+        return 0
+    else:
+        for lr in get_lr:
+            if lr > LearnRate_threshold * 100 or lr < LearnRate_threshold / 100:
+                file.write("\t Learning Rate \t")
+                return 0
+    file.write("\t Please change optimizer \t")
+        
+def DeadNodeAnalysis(model, X_train, layer, get_weights, get_lr, file):
+    if np.min(X_train) < -1 or np.max(X_train) > 1 :
+        file.write("\t Normalize the data \t")
+        return 0
+    for w in get_weights:
+        if w is not None:
+            if identifyTensorVariance(w):
+                file.write("\t Poor Weight \t")
+                return 0
+    for lr in get_lr:
+        if lr > LearnRate_threshold * 100 or lr < LearnRate_threshold / 100:
+            file.write("\t Learning Rate \t")
+            return 0
+    file.write("\t Add dropout layer or Missing activation function\t ")
+    
+def VanishingAnalysis(model, X_train, layer, get_weights, get_lr, file ):
+    
+    for lr in get_lr:
+        if lr > LearnRate_threshold * 100 or lr < LearnRate_threshold / 100:
+            file.write("\t Learning Rate \t")
+            return 0
+    file.write("\t Add/delete layer or change sigmoid activation function \t")
+
+def SaturatedActivationAnalysis(model, X_train, layer, get_weights, get_lr, file):
+    if np.min(X_train) < -1 or np.max(X_train) > 1 :
+        file.write("\t Normalize the data \t")
+        return 0
+    for w in get_weights:
+        if w is not None:
+            if identifyTensorVariance(w):
+                file.write("\t Poor Weight \t")
+                return 0
+    for lr in get_lr:
+        if lr > LearnRate_threshold * 100 or lr < LearnRate_threshold / 100:
+            file.write("\t Learning Rate \t")
+            return 0
+    file.write("\t Add dropout layer or Missing activation function\t ")
+        
+
+class mapFaluireToFix(Callback):
+    """Callback that terminates training when a NaN loss is encountered.
+    """
+    def __init__(self, inputs,outputs, layer_number, batch_size, startTime, lr, file ,epoch  ):
+        super(mapFaluireToFix, self).__init__()
+        self.inputs = inputs
+        self.outputs = outputs
+        self.accuList = []
+        self.lossList = []
+        self.lr = lr
+        self.file = file
+        self.epoch = epoch
+        #self.learn = alpha
+        
+        self.counter = 1
+        self.iterator = 1
+        self.lay_num = layer_number
+        
+        self.weightLayer = []
+        self.forward =[]
+        self.backward =[]
+        self.delta_wrights = []
+        self.batch_size = batch_size
+        self.start_time = startTime
+        self.weightLayerFreq = zeros([self.lay_num])
+        self.forwardFreq = zeros([self.lay_num])
+        self.backwardFreq = zeros([self.lay_num])
+        self.delta_wrightsFreq = zeros([self.lay_num])
+        
+        
+        self.learningRate = None
+        self.get_weight = None
+        
+        for ls in range(self.lay_num):
+            self.weightLayer.append([])
+            self.forward.append([])
+            self.backward.append([])
+            self.delta_wrights.append([])
+            
+    def on_epoch_end(self, batch, logs=None):
+        N = 5
+        FRQ = 20
+        logs = logs or {}
+        
+        batch_x = self.inputs[0:self.batch_size]
+        batch_y = self.outputs[0:self.batch_size]
+        try:
+            weight_grads = get_weight_grad(self.model,batch_x ,batch_y )
+            layer_weights = get_weights(self.model)
+            self.learningRate = identifyLearnRate(self.lr,layer_weights, weight_grads) #getLR(self.model)
+            self.get_weight = layer_weights
+            '***************************************** Forward  Begin *****************************************'
+            list_name = get_layer_name(self.model)
+            forward_layer = get_layer_output_observation(self.model, batch_x)
+            for layerF in range (len(forward_layer)):
+                self.forward[layerF].append(np.mean(forward_layer[layerF]))
+                if (layerF + 1 == self.lay_num) and (list_name[layerF] !="softmax") and (batch == 0):
+                    if identifyRange(self.model, self.outputs,list_name[layerF] ,forward_layer[layerF] ):
+                        self.file.write('\tBatch %d layer %d:  Out of Rang Problem, terminating training\t' % (batch, layerF))
+                        self.file.write("\t --- %s seconds ---\t" % (time.clock() - self.start_time))
+                        OutofRangAnalysis(self.model,layerF,self.inputs, self.file )
+                        self.model.stop_training = True
+                        raise SystemExit('want to exit')
+                        sys.exit(1)
+                if identifyNumerical(np.mean(forward_layer[layerF])):
+                    self.file.write('\t Batch %d layer %d: Numerical Problem Forward, terminating training \t' % (batch, layerF))
+                    self.file.write("\t --- %s seconds ---\t" % (time.clock() - self.start_time))
+                    NumericalErrorAnalysis(self.model, self.inputs ,'FW', layerF, self.lay_num, self.get_weight, self.learningRate, self.file)
+                    self.model.stop_training = True
+                    raise SystemExit('want to exit')
+                    #sys.exit(1)     
+                if (list_name[layerF] == "relu" or list_name[layerF] == "exponential") and batch == (self.epoch -1) :
+                    if identifyDead(forward_layer[layerF], layerF):
+                        self.file.write('\tBatch %d layer %d: Dead Node Problem, terminating training\t' % (batch, layerF))
+                        self.file.write("\t --- %s seconds ---\t" % (time.clock() - self.start_time))
+                        DeadNodeAnalysis(self.model, self.inputs, layerF, self.get_weight, self.learningRate, self.file)
+                        self.model.stop_training = True
+                        raise SystemExit('want to exit')
+                        #sys.exit(1)
+                if self.counter % N == 0:
+                    if (layerF + 1 < self.lay_num) and (list_name[layerF + 1] =="sigmoid" or list_name[layerF + 1] =="tanh"):
+                        if identifySaturated(forward_layer[layerF],list_name[layerF + 1], layerF):
+                            self.file.write('\tBatch %d layer %d: Saturated Activation Problem, terminating training\t' % (batch, layerF))
+                            SaturatedActivationAnalysis(self.model, self.inputs, layerF, self.get_weight, self.learningRate , self.file)
+                            self.file.write("\t --- %s seconds ---\t" % (time.clock() - self.start_time))
+                            self.model.stop_training = True
+                            raise SystemExit('want to exit')
+                            #sys.exit(1)
+
+            if self.counter % N == 0:
+                for layerN in range (len(forward_layer)):
+                    if layerN != len(forward_layer) -1 :
+                       if meanResult(self.forward[layerN][-N:]) and  list_name[layerN].find('flatten') == -1:
+                           self.file.write('\tBatch %d layer %d: Unchange Tensor in forward, terminating training\t' % (batch, layerN))
+                           self.file.write("\t --- %s seconds ---\t" % (time.clock() - self.start_time))
+                           UnchangeTensor(self.model,'FW', layerN, self.lay_num, self.get_weight, self.learningRate, self.file)
+                           self.model.stop_training = True
+                           raise SystemExit('want to exit')
+                           #sys.exit(1)
+                       self.forward[layerN].clear()
+            '***************************************** Forward  End *****************************************'
+            
+            '***************************************** Metrics  Begin *****************************************'
+            loss = logs.get('loss')
+            if loss is not None:
+                self.lossList.append(loss)
+                if np.isnan(loss) or np.isinf(loss):
+                    self.file.write('\tBatch %d: Invalid loss, terminating training\t' % (batch))
+                    self.file.write("\t --- %s seconds ---\t" % (time.clock() - self.start_time))
+                    AccuracyInvalid(self.model, self.inputs, list_name[self.lay_num -1], self.lay_num,self.get_weight, self.learningRate, self.file)
+                    self.model.stop_training = True
+                    raise SystemExit('want to exit')
+                    #sys.exit(1)
+                
+                if self.counter % N == 0:
+                    if meanResult(self.lossList[-N:]):
+                        self.file.write('\tBatch %d: Loss Not Decreasing, terminating training\t' % (batch))
+                        self.file.write("\t --- %s seconds ---\t" % (time.clock() - self.start_time))
+                        LossAnalysis(self.model, self.inputs, "ACC", self.lay_num, self.get_weight, self.learningRate)
+                        AccuracyAnalysis(self.model, self.inputs, "ACC", self.lay_num, self.get_weight, self.learningRate, self.file)
+                        self.model.stop_training = True
+                        raise SystemExit('want to exit')
+                        #sys.exit(1)
+                    self.lossList.clear()
+            
+            acc  = logs.get('acc')
+            if acc is None:
+                acc  = logs.get('accuracy')
+            if acc is not None:
+                self.accuList.append(acc)
+                if np.isnan(acc) or np.isinf(acc) or acc == 0 :
+                    self.file.write('\tBatch %d: Invalid accuracy, terminating training\t' % (batch))
+                    self.file.write("\t --- %s seconds ---\t" % (time.clock() - self.start_time))
+                    AccuracyInvalid(self.model, self.inputs, list_name[self.lay_num -1], self.lay_num,self.get_weight, self.learningRate, self.file)
+                    self.model.stop_training = True
+                    raise SystemExit('want to exit')
+                    #sys.exit(1)
+                if self.counter % FRQ == 0:
+                    if meanResult(self.accuList[-FRQ:]):
+                        self.file.write('\tBatch %d: Accurcy Not Increasing, terminating training\t' % (batch))
+                        self.file.write("\t --- %s seconds ---\t" % (time.clock() - self.start_time))
+                        AccuracyAnalysis(self.model, self.inputs, "ACC", self.lay_num, self.get_weight, self.learningRate, self.file)
+                        self.model.stop_training = True    
+                        raise SystemExit('want to exit')
+                        #sys.exit(1)
+                    self.accuList.clear()
+            '***************************************** Metrics  End *****************************************'
+            index = len(weight_grads) -2
+            for layerG in reversed( range (self.lay_num)):                        
+                if list_name[layerG].find('dense') != -1:
+                    if identifyNumerical(np.mean(weight_grads[index])):
+                        self.file.write('\tBatch %d layer %d: Numerical Error in delta Weights, terminating training\t' % (batch, layerG))
+                        self.file.write("\t --- %s seconds ---\t" % (time.clock() - self.start_time))
+                        NumericalErrorAnalysis(self.model, self.inputs,'DW', layerG, self.lay_num, self.get_weight, self.learningRate, self.file)
+                        self.model.stop_training = True
+                        sys.exit(1)
+                    if identifyVanishingGradient(weight_grads[index]):
+                        self.file.write('\tBatch %d layer %d: Vanishing Gradient Problem in delta Weights, terminating training\t' % (batch, layerG))
+                        self.file.write("\t --- %s seconds ---\t" % (time.clock() - self.start_time))
+                        VanishingAnalysis(self.model, self.inputs, index, self.get_weight, self.learningRate, self.file)
+                        self.model.stop_training = True
+                        raise SystemExit('want to exit')
+                        #sys.exit(1)
+                    self.delta_wrights[layerG].append(np.mean(weight_grads[index]))
+                    index -=2
+                else:
+                    self.delta_wrights[layerG].append(None)
+                
+                self.weightLayer[layerG].append(layer_weights[layerG])
+                if layer_weights[layerG] is not None:
+                    if identifyNumerical(layer_weights[layerG]):
+                        self.file.write('\tBatch %d layer %d: Numerical Error in Weights, terminating training\t' % (batch, layerG))
+                        self.file.write("\t --- %s seconds ---\t" % (time.clock() - self.start_time))
+                        NumericalErrorAnalysis(self.model, self.inputs,'W', layerG, self.lay_num, self.get_weight, self.learningRate, self.file)
+                        self.model.stop_training = True
+                        raise SystemExit('want to exit')
+                        #sys.exit(1)        
+            if self.counter % N == 0:
+                for layerB in reversed( range (self.lay_num)):  
+                   if list_name[layerB].find('dense') != -1:
+                        if meanResult(self.delta_wrights[layerB][-N:]) :
+                           self.file.write('\tBatch %d layer %d: Unchange Tensor in Delta Weights, terminating training\t' % (batch, layerB))
+                           self.file.write("\t --- %s seconds ---\t" % (time.clock() - self.start_time))
+                           UnchangeTensor(self.model,'DW', layerB, self.lay_num, self.get_weight, self.learningRate, self.file)
+                           self.model.stop_training = True
+                           raise SystemExit('want to exit')
+                           #sys.exit(1)
+                   self.delta_wrights[layerB].clear()
+                   
+                   if list_name[layerB].find('dense') != -1:
+                        if meanResult(self.weightLayer[layerB][-N:]) :
+                           self.file.write('\tBatch %d layer %d: Unchange Tensor  in Weights, terminating training\t' % (batch, layerB))
+                           self.file.write("\t --- %s seconds ---\t" % (time.clock() - self.start_time))
+                           UnchangeTensor(self.model,'W', layerB, self.lay_num, self.get_weight, self.learningRate, self.file)
+                           self.model.stop_training = True
+                           raise SystemExit('want to exit')
+                           #sys.exit(1)
+                   self.weightLayer[layerB].clear()
+              
+        except SystemExit:
+            print("program is still open")
+            self.model.stop_training = True
+        self.counter += 1
+        self.iterator = self.iterator + 1
+        gc.collect()
+    '***************************************** Output Gradient and Layers End *****************************************'
+
+
+
+
+
+class DeepLocalize(Callback):
+    """Callback that terminates training when a NaN loss is encountered.
+    """
+    def __init__(self, inputs,outputs, layer_number, batch_size, startTime):
+        super(DeepLocalize, self).__init__()
+        self.inputs = inputs
+        self.outputs = outputs
+        
+        
+        self.accuList = []
+        self.lossList = []
+        
+        self.counter = 1
+        self.lay_num = layer_number
+        
+        self.weightLayer = []
+        self.forward =[]
+        self.backward =[]
+        self.delta_wrights = []
+        self.batch_size = batch_size
+        self.start_time = startTime
+        
+        
+        self.weightLayerFreq = zeros([self.lay_num])
+        self.forwardFreq = zeros([self.lay_num])
+        self.backwardFreq = zeros([self.lay_num])
+        self.delta_wrightsFreq = zeros([self.lay_num])
+        
+        for ls in range(self.lay_num):
+            self.weightLayer.append([])
+            self.forward.append([])
+            self.backward.append([])
+            self.delta_wrights.append([])
+            
+            
+    def on_batch_end(self, batch, logs=None):
+        N = 5
+        
+        logs = logs or {}
+        
+        #batch_x = self.inputs[(self.counter -1) * self.batch_size: self.counter * self.batch_size]
+        #batch_y = self.outputs[(self.counter -1) * self.batch_size: self.counter * self.batch_size]
+        batch_x = self.inputs[batch * self.batch_size: (batch +1) * self.batch_size]
+        batch_y = self.outputs[batch * self.batch_size: (batch +1) * self.batch_size]
+
+        
+        '***************************************** Forward  Begin *****************************************'
+        list_name = get_layer_name(self.model)
+        
+        forward_layer = get_layer_output(self.model, batch_x)
+
+        for layer in range (len(forward_layer)):
+            self.forward[layer].append(forward_layer[layer])
+            if np.isnan(forward_layer[layer]) or np.isinf(forward_layer[layer]):
+                print('Batch %d layer %d: Error in forward, terminating training' % (batch, layer))
+                print("\n --- %s seconds ---" % (time.clock() - self.start_time))
+                self.model.stop_training = True
+                sys.exit(1)
+                
+            if forward_layer[layer] == 0:
+                self.forwardFreq[layer] +=1
+                if self.forwardFreq[layer] >= (self.counter/2):
+                     print('Batch %d layer %d: Error in forward, terminating training' % (batch, layer))
+                     print("\n --- %s seconds ---" % (time.clock() - self.start_time))
+                     self.model.stop_training = True
+                     sys.exit(1)
+                    
+        if self.counter % N == 0:
+            for layerN in range (len(forward_layer)):
+               if meanResult(self.forward[layerN][-N:]) and  list_name[layerN].find('flatten') == -1:
+                   print('Batch %d layer %d: Error in forward, terminating training' % (batch, layerN))
+                   print("\n --- %s seconds ---" % (time.clock() - self.start_time))
+                   self.model.stop_training = True
+                   sys.exit(1)
+               self.forward[layerN].clear()
+        '***************************************** Forward  End *****************************************'
+        
+        '***************************************** Weights  Begin *****************************************'
+        layer_weights = get_weights(self.model)
+        for layerX in reversed( range (len(layer_weights))) :
+            self.weightLayer[layerX].append(layer_weights[layerX])
+            if layer_weights[layerX] is not None:
+                if np.isnan(layer_weights[layerX]) or np.isinf(layer_weights[layerX]):
+                    print('Batch %d layer %d: Error in Weights, terminating training' % (batch, layerX))
+                    print("\n --- %s seconds ---" % (time.clock() - self.start_time))
+                    self.model.stop_training = True
+                    sys.exit(1)
+                if layer_weights[layerX] == 0:
+                    self.weightLayerFreq[layerX] +=1
+                    if self.weightLayerFreq[layerX] >= (self.counter / 2):
+                        print('Batch %d layer %d: Error in Weights, terminating training' % (batch, layerX))
+                        print("\n --- %s seconds ---" % (time.clock() - self.start_time))
+                        self.model.stop_training = True
+                        sys.exit(1)
+        
+        if self.counter % N == 0:
+            for layerY in reversed( range (self.lay_num)) :
+                if list_name[layerY].find('dense') != -1:
+                    if meanResult(self.weightLayer[layerY][-N:]) :
+                       print('Batch %d layer %d: Error in Weights, terminating training' % (batch, layerY))
+                       print("\n --- %s seconds ---" % (time.clock() - self.start_time))
+                       self.model.stop_training = True
+                       sys.exit(1)
+                self.weightLayer[layerY].clear()
+        
+        '***************************************** Weights  End *****************************************'
+        '***************************************** Metrics  Begin *****************************************'
+        loss = logs.get('loss')
+        if loss is not None:
+            self.lossList.append(loss)
+            if np.isnan(loss) or np.isinf(loss):
+                print('Batch %d: Invalid loss, terminating training' % (batch))
+                print("\n --- %s seconds ---" % (time.clock() - self.start_time))
+                self.model.stop_training = True
+                sys.exit(1)
+            if self.counter % N == 0:
+                if meanResult(self.lossList[-N:]):
+                    print('Batch %d: MDL, terminating training' % (batch))
+                    print("\n --- %s seconds ---" % (time.clock() - self.start_time))
+                    self.model.stop_training = True
+                    sys.exit(1)
+                self.lossList.clear()
+        
+        acc  = logs.get('acc')
+        if acc is not None:
+           
+            self.accuList.append(acc)
+            if np.isnan(acc) or np.isinf(acc):
+                print('Batch %d: Invalid accuracy, terminating training' % (batch))
+                print("\n --- %s seconds ---" % (time.clock() - self.start_time))
+                self.model.stop_training = True
+                sys.exit(1)
+            if self.counter % N == 0:
+                if meanResult(self.accuList[-N:]):
+                    print('Batch %d: MDL, terminating training' % (batch))
+                    print("\n --- %s seconds ---" % (time.clock() - self.start_time))
+                    self.model.stop_training = True    
+                    sys.exit(1)
+                self.accuList.clear()
+        '***************************************** Metrics  End *****************************************'
+                
+        '***************************************** Delta  Weights and Layers Begin *****************************************'
+        weight_grads = get_weight_grad(self.model,batch_x ,batch_y )
+        index = len(weight_grads) -2
+        for layerD in reversed(range(self.lay_num)):
+            if list_name[layerD].find('dense') != -1:
+                if np.isnan(np.mean(weight_grads[index])) or np.isinf(np.mean(weight_grads[index])):
+                    print('Batch %d layer %d: Error in delta Weights, terminating training' % (batch, layerD))
+                    print("\n --- %s seconds ---" % (time.clock() - self.start_time))
+                    self.model.stop_training = True
+                    sys.exit(1)
+                self.delta_wrights[layerD].append(np.mean(weight_grads[index]))
+                if np.mean(weight_grads[index]) == 0:
+                    self.delta_wrightsFreq[layerD] +=1
+                    if self.delta_wrightsFreq[layerD] >= (self.counter / 2):
+                        print('Batch %d layer %d: Error in delta Weights, terminating training' % (batch, layerD))
+                        print("\n --- %s seconds ---" % (time.clock() - self.start_time))
+                        self.model.stop_training = True      
+                        sys.exit(1)
+                index -=2
+            else:
+                self.delta_wrights[layerD].append(None)
+        
+        if self.counter % N == 0:
+            for layerT in reversed(range(self.lay_num)):  
+                if list_name[layerT].find('dense') != -1:
+                    if meanResult(self.delta_wrights[layerT][-N:]) :
+                       print('Batch %d layer %d: Error in Delta Weights, terminating training' % (batch, layerT))
+                       print("\n --- %s seconds ---" % (time.clock() - self.start_time))
+                       self.model.stop_training = True
+                       sys.exit(1)
+                self.delta_wrights[layerT].clear()
+        '***************************************** Delta  Weights and Layers End *****************************************'
+        
+        
+        '***************************************** Output Gradient and Layers Begin *****************************************'                              
+        
+        
+        for layerG in reversed( range (self.lay_num)):
+            output_gradient = get_layer_output_grad_all(self.model,batch_x ,batch_y, layerG )
+            self.backward[layerG].append(output_gradient)
+            if np.isnan(output_gradient) or np.isinf(output_gradient):
+                    print('Batch %d layer %d: Error in Output Gradient, terminating training' % (batch, layerG))
+                    print("\n --- %s seconds ---" % (time.clock() - self.start_time))
+                    self.model.stop_training = True
+                    sys.exit(1)
+            if np.mean(output_gradient) == 0:
+                self.backwardFreq[layerG] +=1
+                if self.backwardFreq[layerG] >= (self.counter/2):
+                     print('Batch %d layer %d: Error in Output Gradient, terminating training' % (batch, layerG))
+                     print("\n --- %s seconds ---" % (time.clock() - self.start_time))
+                     self.model.stop_training = True
+                     sys.exit(1)
+        
+        if self.counter % N == 0:
+            for layerB in reversed( range (self.lay_num)):
+               if meanResult(self.backward[layerB][-N:]) and  list_name[layerB].find('flatten') == -1:
+                   print('Batch %d layer %d: Error in Output Gradient, terminating training' % (batch, layerB))
+                   print("\n --- %s seconds ---" % (time.clock() - self.start_time))
+                   self.model.stop_training = True
+                   sys.exit(1)
+               self.backward[layerB].clear()
+        self.counter += 1
+        gc.collect()
+        '***************************************** Output Gradient and Layers End *****************************************'
+
 class ProgbarLogger(Callback):
     """Callback that prints metrics to stdout.
 
@@ -479,10 +1292,6 @@ class EarlyStopping(Callback):
         baseline: Baseline value for the monitored quantity to reach.
             Training will stop if the model doesn't show improvement
             over the baseline.
-        restore_best_weights: whether to restore model weights from
-            the epoch with the best value of the monitored quantity.
-            If False, the model weights obtained at the last step of
-            training are used.
     """
 
     def __init__(self,
@@ -491,8 +1300,7 @@ class EarlyStopping(Callback):
                  patience=0,
                  verbose=0,
                  mode='auto',
-                 baseline=None,
-                 restore_best_weights=False):
+                 baseline=None):
         super(EarlyStopping, self).__init__()
 
         self.monitor = monitor
@@ -502,8 +1310,6 @@ class EarlyStopping(Callback):
         self.min_delta = min_delta
         self.wait = 0
         self.stopped_epoch = 0
-        self.restore_best_weights = restore_best_weights
-        self.best_weights = None
 
         if mode not in ['auto', 'min', 'max']:
             warnings.warn('EarlyStopping mode %s is unknown, '
@@ -536,39 +1342,26 @@ class EarlyStopping(Callback):
             self.best = np.Inf if self.monitor_op == np.less else -np.Inf
 
     def on_epoch_end(self, epoch, logs=None):
-        current = self.get_monitor_value(logs)
+        current = logs.get(self.monitor)
         if current is None:
-            return
-
-        if self.monitor_op(current - self.min_delta, self.best):
-            self.best = current
-            self.wait = 0
-            if self.restore_best_weights:
-                self.best_weights = self.model.get_weights()
-        else:
-            self.wait += 1
-            if self.wait >= self.patience:
-                self.stopped_epoch = epoch
-                self.model.stop_training = True
-                if self.restore_best_weights:
-                    if self.verbose > 0:
-                        print('Restoring model weights from the end of '
-                              'the best epoch')
-                    self.model.set_weights(self.best_weights)
-
-    def on_train_end(self, logs=None):
-        if self.stopped_epoch > 0 and self.verbose > 0:
-            print('Epoch %05d: early stopping' % (self.stopped_epoch + 1))
-
-    def get_monitor_value(self, logs):
-        monitor_value = logs.get(self.monitor)
-        if monitor_value is None:
             warnings.warn(
                 'Early stopping conditioned on metric `%s` '
                 'which is not available. Available metrics are: %s' %
                 (self.monitor, ','.join(list(logs.keys()))), RuntimeWarning
             )
-        return monitor_value
+            return
+        if self.monitor_op(current - self.min_delta, self.best):
+            self.best = current
+            self.wait = 0
+        else:
+            self.wait += 1
+            if self.wait >= self.patience:
+                self.stopped_epoch = epoch
+                self.model.stop_training = True
+
+    def on_train_end(self, logs=None):
+        if self.stopped_epoch > 0 and self.verbose > 0:
+            print('Epoch %05d: early stopping' % (self.stopped_epoch + 1))
 
 
 class RemoteMonitor(Callback):
@@ -578,18 +1371,16 @@ class RemoteMonitor(Callback):
     Events are sent to `root + '/publish/epoch/end/'` by default. Calls are
     HTTP POST, with a `data` argument which is a
     JSON-encoded dictionary of event data.
-    If send_as_json is set to True, the content type of the request will be
-    application/json. Otherwise the serialized JSON will be send within a form
+    If send_as_json is set to True, the content type of the request will be application/json.
+    Otherwise the serialized JSON will be send within a form
 
     # Arguments
         root: String; root url of the target server.
         path: String; path relative to `root` to which the events will be sent.
-        field: String; JSON field under which the data will be stored.
-            The field is used only if the payload is sent within a form
-            (i.e. send_as_json is set to False).
+        field: String; JSON field under which the data will be stored. The field is used only if the payload is sent
+        within a form (i.e. send_as_json is set to False).
         headers: Dictionary; optional custom HTTP headers.
-        send_as_json: Boolean; whether the request should be send as
-            application/json.
+        send_as_json: Boolean; whether the request should be send as application/json.
     """
 
     def __init__(self,
@@ -658,12 +1449,8 @@ class LearningRateScheduler(Callback):
                              'should be float.')
         K.set_value(self.model.optimizer.lr, lr)
         if self.verbose > 0:
-            print('\nEpoch %05d: LearningRateScheduler setting learning '
+            print('\nEpoch %05d: LearningRateScheduler reducing learning '
                   'rate to %s.' % (epoch + 1, lr))
-
-    def on_epoch_end(self, epoch, logs=None):
-        logs = logs or {}
-        logs['lr'] = K.get_value(self.model.optimizer.lr)
 
 
 class TensorBoard(Callback):
@@ -717,14 +1504,7 @@ class TensorBoard(Callback):
         embeddings_data: data to be embedded at layers specified in
             `embeddings_layer_names`. Numpy array (if the model has a single
             input) or list of Numpy arrays (if the model has multiple inputs).
-            Learn [more about embeddings]
-            (https://www.tensorflow.org/programmers_guide/embedding).
-        update_freq: `'batch'` or `'epoch'` or integer. When using `'batch'`, writes
-            the losses and metrics to TensorBoard after each batch. The same
-            applies for `'epoch'`. If using an integer, let's say `10000`,
-            the callback will write the metrics and losses to TensorBoard every
-            10000 samples. Note that writing too frequently to TensorBoard
-            can slow down your training.
+            Learn [more about embeddings](https://www.tensorflow.org/programmers_guide/embedding)
     """
 
     def __init__(self, log_dir='./logs',
@@ -736,16 +1516,14 @@ class TensorBoard(Callback):
                  embeddings_freq=0,
                  embeddings_layer_names=None,
                  embeddings_metadata=None,
-                 embeddings_data=None,
-                 update_freq='epoch'):
+                 embeddings_data=None):
         super(TensorBoard, self).__init__()
         global tf, projector
         try:
             import tensorflow as tf
             from tensorflow.contrib.tensorboard.plugins import projector
         except ImportError:
-            raise ImportError('You need the TensorFlow module installed to '
-                              'use TensorBoard.')
+            raise ImportError('You need the TensorFlow module installed to use TensorBoard.')
 
         if K.backend() != 'tensorflow':
             if histogram_freq != 0:
@@ -776,13 +1554,6 @@ class TensorBoard(Callback):
         self.embeddings_metadata = embeddings_metadata or {}
         self.batch_size = batch_size
         self.embeddings_data = embeddings_data
-        if update_freq == 'batch':
-            # It is the same as writing as frequently as possible.
-            self.update_freq = 1
-        else:
-            self.update_freq = update_freq
-        self.samples_seen = 0
-        self.samples_seen_at_last_write = 0
 
     def set_model(self, model):
         self.model = model
@@ -803,8 +1574,7 @@ class TensorBoard(Callback):
                         grads = [
                             grad.values if is_indexed_slices(grad) else grad
                             for grad in grads]
-                        tf.summary.histogram('{}_grad'.format(mapped_weight_name),
-                                             grads)
+                        tf.summary.histogram('{}_grad'.format(mapped_weight_name), grads)
                     if self.write_images:
                         w_img = tf.squeeze(weight)
                         shape = K.int_shape(w_img)
@@ -842,8 +1612,7 @@ class TensorBoard(Callback):
                 if hasattr(layer, 'output'):
                     if isinstance(layer.output, list):
                         for i, output in enumerate(layer.output):
-                            tf.summary.histogram('{}_out_{}'.format(layer.name, i),
-                                                 output)
+                            tf.summary.histogram('{}_out_{}'.format(layer.name, i), output)
                     else:
                         tf.summary.histogram('{}_out'.format(layer.name),
                                              layer.output)
@@ -856,8 +1625,7 @@ class TensorBoard(Callback):
             self.writer = tf.summary.FileWriter(self.log_dir)
 
         if self.embeddings_freq and self.embeddings_data is not None:
-            self.embeddings_data = standardize_input_data(self.embeddings_data,
-                                                          model.input_names)
+            self.embeddings_data = standardize_input_data(self.embeddings_data, model.input_names)
 
             embeddings_layer_names = self.embeddings_layer_names
 
@@ -964,8 +1732,8 @@ class TensorBoard(Callback):
                     batch = slice(i, i + step)
 
                     if type(self.model.input) == list:
-                        feed_dict = {_input: embeddings_data[idx][batch]
-                                     for idx, _input in enumerate(self.model.input)}
+                        feed_dict = {model_input: embeddings_data[idx][batch]
+                                     for idx, model_input in enumerate(self.model.input)}
                     else:
                         feed_dict = {self.model.input: embeddings_data[0][batch]}
 
@@ -976,42 +1744,23 @@ class TensorBoard(Callback):
 
                     self.sess.run(self.assign_embeddings, feed_dict=feed_dict)
                     self.saver.save(self.sess,
-                                    os.path.join(self.log_dir,
-                                                 'keras_embedding.ckpt'),
+                                    os.path.join(self.log_dir, 'keras_embedding.ckpt'),
                                     epoch)
 
                     i += self.batch_size
 
-        if self.update_freq == 'epoch':
-            index = epoch
-        else:
-            index = self.samples_seen
-        self._write_logs(logs, index)
-
-    def _write_logs(self, logs, index):
         for name, value in logs.items():
             if name in ['batch', 'size']:
                 continue
             summary = tf.Summary()
             summary_value = summary.value.add()
-            if isinstance(value, np.ndarray):
-                summary_value.simple_value = value.item()
-            else:
-                summary_value.simple_value = value
+            summary_value.simple_value = value.item()
             summary_value.tag = name
-            self.writer.add_summary(summary, index)
+            self.writer.add_summary(summary, epoch)
         self.writer.flush()
 
     def on_train_end(self, _):
         self.writer.close()
-
-    def on_batch_end(self, batch, logs=None):
-        if self.update_freq != 'epoch':
-            self.samples_seen += logs['size']
-            samples_seen_since = self.samples_seen - self.samples_seen_at_last_write
-            if samples_seen_since >= self.update_freq:
-                self._write_logs(logs, self.samples_seen)
-                self.samples_seen_at_last_write = self.samples_seen
 
 
 class ReduceLROnPlateau(Callback):
@@ -1126,8 +1875,8 @@ class ReduceLROnPlateau(Callback):
                         new_lr = max(new_lr, self.min_lr)
                         K.set_value(self.model.optimizer.lr, new_lr)
                         if self.verbose > 0:
-                            print('\nEpoch %05d: ReduceLROnPlateau reducing '
-                                  'learning rate to %s.' % (epoch + 1, new_lr))
+                            print('\nEpoch %05d: ReduceLROnPlateau reducing learning '
+                                  'rate to %s.' % (epoch + 1, new_lr))
                         self.cooldown_counter = self.cooldown
                         self.wait = 0
 
@@ -1162,12 +1911,7 @@ class CSVLogger(Callback):
         self.writer = None
         self.keys = None
         self.append_header = True
-        if six.PY2:
-            self.file_flags = 'b'
-            self._open_args = {}
-        else:
-            self.file_flags = ''
-            self._open_args = {'newline': '\n'}
+        self.file_flags = 'b' if six.PY2 and os.name == 'nt' else ''
         super(CSVLogger, self).__init__()
 
     def on_train_begin(self, logs=None):
@@ -1175,12 +1919,9 @@ class CSVLogger(Callback):
             if os.path.exists(self.filename):
                 with open(self.filename, 'r' + self.file_flags) as f:
                     self.append_header = not bool(len(f.readline()))
-            mode = 'a'
+            self.csv_file = open(self.filename, 'a' + self.file_flags)
         else:
-            mode = 'w'
-        self.csv_file = io.open(self.filename,
-                                mode + self.file_flags,
-                                **self._open_args)
+            self.csv_file = open(self.filename, 'w' + self.file_flags)
 
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
@@ -1199,17 +1940,14 @@ class CSVLogger(Callback):
 
         if self.model.stop_training:
             # We set NA so that csv parsers do not fail for this last epoch.
-            logs = dict([(k, logs[k] if k in logs else 'NA') for k in self.keys])
+            logs = dict([(k, logs[k]) if k in logs else (k, 'NA') for k in self.keys])
 
         if not self.writer:
             class CustomDialect(csv.excel):
                 delimiter = self.sep
-            fieldnames = ['epoch'] + self.keys
-            if six.PY2:
-                fieldnames = [unicode(x) for x in fieldnames]
+
             self.writer = csv.DictWriter(self.csv_file,
-                                         fieldnames=fieldnames,
-                                         dialect=CustomDialect)
+                                         fieldnames=['epoch'] + self.keys, dialect=CustomDialect)
             if self.append_header:
                 self.writer.writeheader()
 
